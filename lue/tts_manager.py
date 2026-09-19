@@ -20,6 +20,7 @@ class TTSManager:
     def __init__(self):
         """Initialize the TTS manager and discover available models."""
         self._models = {}
+        self._instances = {}  # Cache pour éviter les ré-instanciations inutiles
         self._discover_models()
 
     def _discover_models(self):
@@ -30,6 +31,10 @@ class TTSManager:
         to load classes that inherit from TTSBase.
         """
         tts_dir = Path(__file__).parent / "tts"
+        if not tts_dir.exists():
+            logging.warning(f"Le dossier TTS '{tts_dir}' est introuvable.")
+            return
+
         for file_path in tts_dir.glob("*_tts.py"):
             module_name = file_path.stem
             try:
@@ -62,7 +67,7 @@ class TTSManager:
 
     def create_model(self, name: str, console: Console, voice: str = None, lang: str = None) -> TTSBase | None:
         """
-        Create an instance of the specified TTS model.
+        Create or retrieve an instance of the specified TTS model.
         
         Args:
             name: Name of the TTS model to create
@@ -71,11 +76,23 @@ class TTSManager:
             lang: Optional language for the TTS model
             
         Returns:
-            TTSBase: Model instance, or None if model not found
+            TTSBase: Model instance, or None if model not found or failed to initialize
         """
+        # Utilisation d'une clé de cache basée sur les paramètres pour réutiliser l'instance si elle existe
+        cache_key = f"{name}:{voice}:{lang}"
+        if cache_key in self._instances:
+            return self._instances[cache_key]
+
         model_class = self._models.get(name)
         if model_class:
-            return model_class(console, voice=voice, lang=lang)
+            try:
+                instance = model_class(console, voice=voice, lang=lang)
+                self._instances[cache_key] = instance
+                return instance
+            except Exception as e:
+                logging.error(f"Failed to instantiate TTS model '{name}': {e}", exc_info=True)
+                return None
+
         logging.error(f"TTS model '{name}' not found.")
         return None
 
@@ -93,6 +110,6 @@ def get_default_tts_model_name(available_models: list[str]) -> str:
     Returns:
         str: Name of the default TTS model
     """
-    if config.DEFAULT_TTS_MODEL in available_models:
+    if getattr(config, "DEFAULT_TTS_MODEL", None) in available_models:
         return config.DEFAULT_TTS_MODEL
     return available_models[0] if available_models else ""

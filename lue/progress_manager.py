@@ -1,13 +1,33 @@
-"""Reading progress management for the Lue eBook reader."""
+"""
+Reading progress management for the Lue eBook reader.
+"""
 
 import os
 import json
 import re
 import glob
+from typing import Dict, Any, List, Optional, Tuple
 from . import config
 
+# Compile regex pattern once for better performance
+COMPILED_SAFE_TITLE_REGEX = re.compile(r'[^A-Za-z0-9]+')
 
-def get_progress_file_path(book_title):
+# Default extended progress configuration dictionary
+DEFAULT_PROGRESS: Dict[str, Any] = {
+    "c": 0,
+    "p": 0,
+    "s": 0,
+    "scroll_offset": 0.0,
+    "tts_enabled": True,
+    "auto_scroll_enabled": True,
+    "speed_reading_enabled": False,
+    "manual_scroll_anchor": None,
+    "playback_speed": 1.0,
+    "completion_percentage": 0.0
+}
+
+
+def get_progress_file_path(book_title: str) -> str:
     """
     Generate the file path for storing reading progress.
     
@@ -17,10 +37,11 @@ def get_progress_file_path(book_title):
     Returns:
         str: Full path to the progress file
     """
-    safe_title = re.sub(r'[^A-Za-z0-9]+', '', book_title)
+    safe_title = COMPILED_SAFE_TITLE_REGEX.sub('', book_title)
     return os.path.join(config.PROGRESS_FILE_DIR, f"{safe_title}.progress.json")
 
-def load_progress(progress_file):
+
+def load_progress(progress_file: str) -> Tuple[int, int, int]:
     """
     Load basic reading progress from file.
     
@@ -30,16 +51,18 @@ def load_progress(progress_file):
     Returns:
         tuple: (chapter_idx, paragraph_idx, sentence_idx)
     """
-    if os.path.exists(progress_file):
+    if not os.path.exists(progress_file):
+        return 0, 0, 0
+        
+    try:
         with open(progress_file, 'r', encoding='utf-8') as f:
-            try:
-                data = json.load(f)
-                return data.get("c", 0), data.get("p", 0), data.get("s", 0)
-            except json.JSONDecodeError:
-                return 0, 0, 0
-    return 0, 0, 0
+            data = json.load(f)
+            return data.get("c", 0), data.get("p", 0), data.get("s", 0)
+    except (json.JSONDecodeError, IOError):
+        return 0, 0, 0
 
-def load_extended_progress(progress_file):
+
+def load_extended_progress(progress_file: str) -> Dict[str, Any]:
     """
     Load extended reading progress including UI state.
     
@@ -49,37 +72,29 @@ def load_extended_progress(progress_file):
     Returns:
         dict: Progress data with reading position and UI state
     """
-    default_progress = {
-        "c": 0, "p": 0, "s": 0,
-        "scroll_offset": 0,
-        "tts_enabled": True,
-        "auto_scroll_enabled": True,
-        "speed_reading_enabled": False,
-        "manual_scroll_anchor": None,
-        "playback_speed": 1.0
-    }
-    
     if not os.path.exists(progress_file):
-        return default_progress
+        return DEFAULT_PROGRESS.copy()
         
     try:
         with open(progress_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
             return {
-                "c": data.get("c", 0),
-                "p": data.get("p", 0), 
-                "s": data.get("s", 0),
-                "scroll_offset": data.get("scroll_offset", 0),
-                "tts_enabled": data.get("tts_enabled", True),
-                "auto_scroll_enabled": data.get("auto_scroll_enabled", True),
-                "speed_reading_enabled": data.get("speed_reading_enabled", False),
-                "manual_scroll_anchor": data.get("manual_scroll_anchor", None),
-                "playback_speed": data.get("playback_speed", 1.0)
+                "c": data.get("c", DEFAULT_PROGRESS["c"]),
+                "p": data.get("p", DEFAULT_PROGRESS["p"]), 
+                "s": data.get("s", DEFAULT_PROGRESS["s"]),
+                "scroll_offset": data.get("scroll_offset", DEFAULT_PROGRESS["scroll_offset"]),
+                "tts_enabled": data.get("tts_enabled", DEFAULT_PROGRESS["tts_enabled"]),
+                "auto_scroll_enabled": data.get("auto_scroll_enabled", DEFAULT_PROGRESS["auto_scroll_enabled"]),
+                "speed_reading_enabled": data.get("speed_reading_enabled", DEFAULT_PROGRESS["speed_reading_enabled"]),
+                "manual_scroll_anchor": data.get("manual_scroll_anchor", DEFAULT_PROGRESS["manual_scroll_anchor"]),
+                "playback_speed": data.get("playback_speed", DEFAULT_PROGRESS["playback_speed"]),
+                "completion_percentage": data.get("completion_percentage", DEFAULT_PROGRESS["completion_percentage"])
             }
     except (json.JSONDecodeError, IOError):
-        return default_progress
+        return DEFAULT_PROGRESS.copy()
 
-def save_progress(progress_file, chapter_idx, paragraph_idx, sentence_idx):
+
+def save_progress(progress_file: str, chapter_idx: int, paragraph_idx: int, sentence_idx: int) -> None:
     """
     Save basic reading progress to file.
     
@@ -93,8 +108,21 @@ def save_progress(progress_file, chapter_idx, paragraph_idx, sentence_idx):
     with open(progress_file, 'w', encoding='utf-8') as f:
         json.dump(progress, f, indent=2)
 
-def save_extended_progress(progress_file, chapter_idx, paragraph_idx, sentence_idx, 
-                          scroll_offset, tts_enabled, auto_scroll_enabled, manual_scroll_anchor=None, original_file_path=None, playback_speed=1.0, percentage=0.0, speed_reading_enabled=False):
+
+def save_extended_progress(
+    progress_file: str, 
+    chapter_idx: int, 
+    paragraph_idx: int, 
+    sentence_idx: int, 
+    scroll_offset: float, 
+    tts_enabled: bool, 
+    auto_scroll_enabled: bool, 
+    manual_scroll_anchor: Optional[Any] = None, 
+    original_file_path: Optional[str] = None, 
+    playback_speed: float = 1.0, 
+    percentage: float = 0.0, 
+    speed_reading_enabled: bool = False
+) -> None:
     """
     Save extended reading progress including UI state.
     
@@ -123,20 +151,17 @@ def save_extended_progress(progress_file, chapter_idx, paragraph_idx, sentence_i
         "playback_speed": float(playback_speed),
         "completion_percentage": float(percentage)
     }
-    if manual_scroll_anchor:
-        progress["manual_scroll_anchor"] = manual_scroll_anchor
-    if original_file_path:
-        progress["original_file_path"] = original_file_path
     
-    # Save percentage if provided (default to 0.0 if not in args, but we will add it to args)
-    # Note: The function signature will be updated in the next step to include percentage.
-    # For now, we'll just add it if passed in kwargs or update the signature.
-    # Actually, I should update the signature in the same edit.
+    if manual_scroll_anchor is not None:
+        progress["manual_scroll_anchor"] = manual_scroll_anchor
+    if original_file_path is not None:
+        progress["original_file_path"] = original_file_path
         
     with open(progress_file, 'w', encoding='utf-8') as f:
         json.dump(progress, f, indent=2)
 
-def get_recent_books(limit=5):
+
+def get_recent_books(limit: int = 5) -> List[Dict[str, Any]]:
     """
     Get a list of recently read books.
     
@@ -164,11 +189,7 @@ def get_recent_books(limit=5):
             if not original_path or not os.path.exists(original_path):
                 continue
                 
-            # Derive title from filename if not stored (we don't store title currently, so use filename)
-            title = os.path.basename(original_path)
-            # Remove extension
-            title = os.path.splitext(title)[0]
-            
+            title = os.path.splitext(os.path.basename(original_path))[0]
             percentage = data.get("completion_percentage", 0.0)
             
             recent_books.append({
@@ -182,7 +203,8 @@ def get_recent_books(limit=5):
             
     return recent_books
 
-def validate_and_set_progress(chapters, progress_file, c, p, s):
+
+def validate_and_set_progress(chapters: List[List[str]], progress_file: str, c: int, p: int, s: int) -> Tuple[int, int, int]:
     """
     Validate reading progress against document structure.
     
@@ -201,13 +223,16 @@ def validate_and_set_progress(chapters, progress_file, c, p, s):
         sentences = re.split(r'(?<=[.!?])\s+', paragraph)
         _ = sentences[s]  # Test if sentence exists
         return c, p, s
-    except IndexError:
-        # Invalid progress, reset to beginning
+    except (IndexError, TypeError):
         if os.path.exists(progress_file):
-            os.remove(progress_file)
+            try:
+                os.remove(progress_file)
+            except OSError:
+                pass
         return 0, 0, 0
 
-def find_most_recent_book():
+
+def find_most_recent_book() -> Optional[str]:
     """
     Find the most recently updated progress file and return the original file path.
     
@@ -219,7 +244,6 @@ def find_most_recent_book():
     if not progress_files:
         return None
     
-    # Find the most recently modified progress file
     most_recent_file = max(progress_files, key=os.path.getmtime)
     
     try:
@@ -227,7 +251,6 @@ def find_most_recent_book():
             data = json.load(f)
             original_path = data.get("original_file_path")
             
-            # Check if the original file still exists
             if original_path and os.path.exists(original_path):
                 return original_path
                 

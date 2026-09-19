@@ -3,6 +3,40 @@
 from abc import ABC, abstractmethod
 from rich.console import Console
 
+# Optionnel : Intégration de la prosodie française de manière sécurisée
+try:
+    from french_prosody import get_french_prosody_engine
+    HAS_FRENCH_PROSODY = True
+except ImportError:
+    HAS_FRENCH_PROSODY = False
+
+try:
+    from english_prosody import get_english_prosody_engine
+    HAS_ENGLISH_PROSODY = True
+except ImportError:
+    HAS_ENGLISH_PROSODY = False
+
+
+def prepare_text_chunk(text: str, language: str = "en") -> str:
+    """
+    Prépare le bloc de texte pour le TTS de manière multilingue (FR / EN).
+    """
+    if not text:
+        return ""
+        
+    lang = language.lower() if language else "en"
+    
+    # Traitement français
+    if HAS_FRENCH_PROSODY and lang.startswith("fr"):
+        return get_french_prosody_engine().prepare_for_tts(text)
+        
+    # Traitement anglais (US/UK)
+    if HAS_ENGLISH_PROSODY and lang.startswith("en"):
+        return get_english_prosody_engine().prepare_for_tts(text)
+        
+    # Comportement par défaut pour les autres langues
+    return text.strip()
+
 
 class TTSBase(ABC):
     """
@@ -102,11 +136,14 @@ class TTSBase(ABC):
             RuntimeError: If model is not initialized
             Exception: If audio generation fails
         """
-        # Generate audio first
-        await self.generate_audio(text, output_path)
+        # 1. Prépare le texte (applique la prosodie française si dispo et si lang == 'fr')
+        processed_text = prepare_text_chunk(text, self.lang)
         
-        # Get raw timing data from the TTS implementation
-        raw_timings = await self.get_raw_timing_data(text, output_path)
+        # 2. Génère l'audio en utilisant le texte préparé
+        await self.generate_audio(processed_text, output_path)
+        
+        # 3. Récupère les timings bruts avec le texte préparé
+        raw_timings = await self.get_raw_timing_data(processed_text, output_path)
         
         # Get actual audio duration
         try:
@@ -119,7 +156,7 @@ class TTSBase(ABC):
             import audio
         duration = await audio.get_audio_duration(output_path)
         
-        # Process timing data using the centralized calculator
+        # Process timing data using the centralized calculator (on garde le texte d'origine pour l'indexation)
         try:
             from ..timing_calculator import process_tts_timing_data
         except ImportError:
