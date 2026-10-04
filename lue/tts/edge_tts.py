@@ -21,6 +21,8 @@ _NS_TO_SECONDS = 10_000_000.0
 class EdgeTTS(TTSBase):
     """TTS implementation for Microsoft Edge's online TTS service."""
 
+    timings_include_audio = True  # get_raw_timing_data() écrit aussi le MP3
+
     @property
     def name(self) -> str:
         return "edge"
@@ -34,6 +36,8 @@ class EdgeTTS(TTSBase):
         self.edge_tts: Any = None
         if self.voice is None:
             self.voice = config.TTS_VOICES.get(self.name)
+        if self.lang is None:
+            self.lang = config.TTS_LANGUAGE_CODES.get(self.name)
 
     async def initialize(self) -> bool:
         """Checks if the edge-tts library is available."""

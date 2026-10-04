@@ -18,10 +18,12 @@ os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "10"
 class KokoroTTS(TTSBase):
     """TTS implementation for Kokoro TTS."""
 
+    timings_include_audio = True
+
     @property
     def name(self) -> str:
         return "kokoro"
-
+    
     @property
     def output_format(self) -> str:
         return "wav"
@@ -31,10 +33,10 @@ class KokoroTTS(TTSBase):
         self.pipeline = None
         self.np = None
         self.sf = None
-
+        
         if self.voice is None:
             self.voice = config.TTS_VOICES.get(self.name)
-
+        
         if self.lang is None:
             self.lang = config.TTS_LANGUAGE_CODES.get(self.name)
 
@@ -43,14 +45,14 @@ class KokoroTTS(TTSBase):
         try:
             if hasattr(self.huggingface_hub, "_patched_by_lue"):
                 return
-
+            
             original_hf_hub_download = self.huggingface_hub.hf_hub_download
-
+            
             def tracked_hf_hub_download(*args, **kwargs):
                 try:
                     local_kwargs = dict(kwargs)
                     local_kwargs["local_files_only"] = True
-                    return original_hf_hub_download(*args, **local_kwargs)
+                    original_hf_hub_download(*args, **local_kwargs)
                 except Exception:
                     repo_id = kwargs.get("repo_id", "<unknown repo>")
                     filename = kwargs.get("filename", "<unknown file>")
@@ -60,11 +62,6 @@ class KokoroTTS(TTSBase):
 
             self.huggingface_hub.hf_hub_download = tracked_hf_hub_download
             self.huggingface_hub._patched_by_lue = True
-
-            import kokoro.model as kokoro_model
-            import kokoro.pipeline as kokoro_pipeline
-            kokoro_model.hf_hub_download = tracked_hf_hub_download
-            kokoro_pipeline.hf_hub_download = tracked_hf_hub_download
         except Exception as e:
             logging.warning(f"Failed to patch Hugging Face downloader: {e}")
 
@@ -75,7 +72,7 @@ class KokoroTTS(TTSBase):
             import soundfile as sf
             from kokoro import KPipeline
             import huggingface_hub
-
+            
             self.np = numpy
             self.sf = sf
             self.KPipeline = KPipeline
@@ -98,7 +95,7 @@ class KokoroTTS(TTSBase):
         def _blocking_init():
             gpu_msg, use_gpu = self._get_gpu_acceleration()
             pipeline, error_msg, device_used = None, None, None
-
+            
             if use_gpu:
                 device_to_try = "mps" if platform.system() == "Darwin" else "cuda"
                 try:
@@ -106,20 +103,20 @@ class KokoroTTS(TTSBase):
                     device_used = device_to_try
                 except Exception as gpu_error:
                     error_msg = f"Failed to initialize on GPU ({device_to_try}): {gpu_error}"
-
+            
             if pipeline is None:
                 try:
                     pipeline = self.KPipeline(repo_id="hexgrad/Kokoro-82M", device="cpu", lang_code=self.lang)
                     device_used = "cpu"
                 except Exception as cpu_error:
                     error_msg = f"Failed to initialize on CPU: {cpu_error}"
-
+            
             return pipeline, (gpu_msg, error_msg), device_used
 
         try:
             pipeline, (gpu_msg, error_details), device_used = await loop.run_in_executor(None, _blocking_init)
             self.console.print(f"[cyan]GPU Check: {gpu_msg}[/cyan]")
-
+            
             if pipeline:
                 self.pipeline = pipeline
                 self.console.print(f"[green]Kokoro TTS model initialized successfully on {device_used}.[/green]")
@@ -140,10 +137,10 @@ class KokoroTTS(TTSBase):
         """Performs a short TTS generation to load the model into memory."""
         if not self.initialized:
             return
-
+        
         self.console.print("[bold cyan]Warming up the Kokoro TTS model... (this may take a minute)[/bold cyan]")
         warmup_file = os.path.join(config.AUDIO_DATA_DIR, f".warmup_kokoro.{self.output_format}")
-
+        
         try:
             await self.generate_audio("Ready.", warmup_file)
             self.console.print("[green]Kokoro TTS model is ready.[/green]")
@@ -174,27 +171,27 @@ class KokoroTTS(TTSBase):
     async def get_raw_timing_data(self, text: str, output_path: str):
         """
         Get raw word timing data from Kokoro TTS.
-
+        
         Returns:
             List of (word, start_time, end_time) tuples with raw timing data from Kokoro TTS
         """
         if not self.initialized or not self.pipeline:
             raise RuntimeError("Kokoro TTS has not been initialized.")
-
+        
         def _blocking_generate():
             try:
                 # Generate audio with timing information
                 results = list(self.pipeline(text, voice=self.voice, split_pattern=None))
-
+                
                 if results:
                     # Concatenate all audio segments
                     audio_segments = [result.audio for result in results]
                     full_audio = self.np.concatenate(audio_segments)
                     self.sf.write(output_path, full_audio, 24000)
-
+                    
                     # Extract precise timing information from tokens
                     word_timings = []
-
+                    
                     # Process each result to extract word-level timing
                     for result in results:
                         if hasattr(result, 'tokens') and result.tokens:
@@ -203,19 +200,19 @@ class KokoroTTS(TTSBase):
                                 # Skip punctuation tokens for word timing
                                 if token.tag in ['.', ',', '!', '?', ':', ';']:
                                     continue
-
+                                
                                 # Use the actual text and timing from the token
                                 word = token.text
                                 start_time = token.start_ts
                                 end_time = token.end_ts
-
+                                
                                 # Filter out None values which can cause errors in timing calculations
                                 if start_time is not None and end_time is not None:
                                     # Only include tokens that contain alphanumeric characters
                                     # This ensures consistency with the timing calculator and UI
                                     if re.search(r'[a-zA-Z0-9]', word):
                                         word_timings.append((word, start_time, end_time))
-
+                    
                     return word_timings
                 else:
                     self.sf.write(output_path, self.np.array([], dtype=self.np.float32), 24000)
@@ -223,46 +220,15 @@ class KokoroTTS(TTSBase):
             except Exception as e:
                 logging.error(f"Error during Kokoro audio generation for text '{text[:50]}...': {e}", exc_info=True)
                 raise e
-
+        
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _blocking_generate)
-
-    async def generate_audio_with_timing(self, text: str, output_path: str):
-        """
-        Generate audio with timing using the centralized timing calculator.
-
-        This method leverages Kokoro TTS's token-level timing information
-        through get_raw_timing_data() and processes it with the timing calculator.
-        """
-        # Get raw timing data (which also generates the audio)
-        raw_timings = await self.get_raw_timing_data(text, output_path)
-
-        # Get actual audio duration
-        try:
-            from .. import audio
-        except ImportError:
-            import sys
-            import os
-            sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-            import audio
-        duration = await audio.get_audio_duration(output_path)
-
-        # Process timing data using the centralized calculator
-        try:
-            from ..timing_calculator import process_tts_timing_data
-        except ImportError:
-            import sys
-            import os
-            sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-            import timing_calculator
-            process_tts_timing_data = timing_calculator.process_tts_timing_data
-        return process_tts_timing_data(text, raw_timings, duration)
 
     async def generate_audio(self, text: str, output_path: str):
         """Generates audio from text using Kokoro in a separate thread."""
         if not self.initialized or not self.pipeline:
             raise RuntimeError("Kokoro TTS has not been initialized.")
-
+        
         def _blocking_generate():
             try:
                 audio_segments = [result.audio for result in self.pipeline(text, voice=self.voice, split_pattern=None)]
@@ -274,6 +240,6 @@ class KokoroTTS(TTSBase):
             except Exception as e:
                 logging.error(f"Error during Kokoro audio generation for text '{text[:50]}...': {e}", exc_info=True)
                 raise e
-
+        
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _blocking_generate)
