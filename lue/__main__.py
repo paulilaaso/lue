@@ -4,7 +4,7 @@ import asyncio
 import sys
 import termios
 import tty
-import subprocess
+import shutil
 import argparse
 import os
 import platform
@@ -178,8 +178,8 @@ async def main():
     parser.add_argument(
         "-m", "--mode",
         type=int,
-        choices=[0, 1, 2, 3],
-        help="Visual layout mode: 0=minimal, 1=medium, 2=full, 3=speed reading",
+        choices=[0, 1, 2, 3, 4],
+        help="Visual layout mode: 0=minimal, 1=medium, 2=full, 3=speed reading, 4=split view",
     )
     
     if available_tts:
@@ -276,15 +276,20 @@ async def main():
     setup_logging()
 
 
-    for tool in ['ffprobe', 'ffplay', 'ffmpeg']:
-        try:
-            subprocess.run([tool, '-version'], check=True, text=True, 
-                         stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            console.print(f"\n[bold red]Error: {tool} not found.[/bold red] "
-                         "Please install FFmpeg and ensure it's in your system's PATH.")
-            logging.error(f"Required tool '{tool}' not found. FFmpeg may not be installed.")
-            sys.exit(1)
+    # Verify that the external FFmpeg executables required by the application
+    # are discoverable through PATH. This avoids spawning three processes merely
+    # to run "-version".
+    required_tools = ("ffmpeg", "ffprobe", "ffplay")
+    missing_tools = [tool for tool in required_tools if shutil.which(tool) is None]
+
+    if missing_tools:
+        tools = ", ".join(missing_tools)
+        console.print(
+            f"\n[bold red]Error: {tools} not found.[/bold red] "
+            "Please install FFmpeg and ensure its executables are in your system's PATH."
+        )
+        logging.error("Required FFmpeg tools not found: %s", tools)
+        sys.exit(1)
 
     # Resolve keyboard shortcuts file
     # Prioritize command-line argument if explicitly provided (not the default)
