@@ -9,8 +9,10 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.align import Align
 from rich import box
+from rich.layout import Layout
 from . import input_handler, config
 from . import content_parser
+from .timing_calculator import has_alnum, split_highlight_units
 
 # ================================
 # CENTRALIZED UI CONFIGURATION
@@ -60,11 +62,10 @@ class UIColors:
     SELECTION_HIGHLIGHT = "reverse" 
     PROGRESS_BAR = "bold blue"  
 
-    # Couleurs pour les headings (sous-titres)
-    HEADING_LEVEL_1 = "bold bright_cyan"   # h1
-    HEADING_LEVEL_2 = "bold bright_magenta"  # h2
-    HEADING_LEVEL_3 = "bold cyan"            # h3
-    HEADING_LEVEL_DEFAULT = "bold white"     # h4+
+    HEADING_LEVEL_1 = "bold bright_cyan"   
+    HEADING_LEVEL_2 = "bold bright_magenta"  
+    HEADING_LEVEL_3 = "bold cyan"            
+    HEADING_LEVEL_DEFAULT = "bold white"     
     
     @classmethod
     def apply_black_theme(cls):
@@ -113,9 +114,10 @@ COLORS = UIColors()
 
 
 def get_terminal_size():
+    """Récupère les dimensions du terminal avec une valeur de repli sécurisée."""
     try:
         columns, rows = os.get_terminal_size()
-        return columns, rows
+        return max(40, columns), max(10, rows)
     except OSError:
         return 80, 24
 
@@ -144,7 +146,6 @@ def _is_chapter_marker(line):
 
 
 def _parse_heading_line(line_text):
-    """Parse __H{level}__text et retourne (level, text)."""
     if not line_text or not isinstance(line_text, str):
         return None, line_text
     if not line_text.startswith('__H') or '__' not in line_text[3:]:
@@ -183,7 +184,6 @@ def update_document_layout(reader):
         for para_idx, paragraph in enumerate(chapter):
             paragraph_start_line = len(reader.document_lines)
 
-            # === GESTION DES HEADINGS TAGUÉS ===
             if paragraph and isinstance(paragraph, str) and paragraph.startswith('__H'):
                 level, text = _parse_heading_line(paragraph)
                 if level is not None:
@@ -212,7 +212,6 @@ def update_document_layout(reader):
                     if para_idx < len(chapter) - 1:
                         reader.document_lines.append(Text("", style=COLORS.TEXT_NORMAL))
                     continue  
-            # =================================
 
             plain_text = Text(
                 paragraph,
@@ -221,9 +220,7 @@ def update_document_layout(reader):
                 style=COLORS.TEXT_NORMAL,
             )
             wrapped_lines = plain_text.wrap(reader.console, available_width)
-            paragraph_end_line = (
-                paragraph_start_line + len(wrapped_lines) - 1
-            )
+            paragraph_end_line = paragraph_start_line + len(wrapped_lines) - 1
 
             reader.paragraph_line_ranges[(chap_idx, para_idx)] = (
                 paragraph_start_line,
@@ -276,9 +273,7 @@ def update_document_layout(reader):
                 target_line = reader.position_to_line[anchor_pos]
                 _, height = get_terminal_size()
                 available_height = max(1, height - 4)
-                max_scroll = max(
-                    0, len(reader.document_lines) - available_height
-                )
+                max_scroll = max(0, len(reader.document_lines) - available_height)
                 reader.scroll_offset = reader.target_scroll_offset = min(
                     target_line, max_scroll
                 )
@@ -310,7 +305,7 @@ def get_current_word(reader):
     except (AttributeError, IndexError):
         return ""
 
-    fallback_words = [token for token in sentence.split() if re.search(r'[a-zA-Z0-9]', token)]
+    fallback_words = split_highlight_units(sentence)
     return fallback_words[0] if fallback_words else ""
 
 
@@ -366,9 +361,6 @@ def get_visible_content(reader):
     elif config.UI_MODE == 0 or config.UI_MODE == 3:
         available_height = height
         available_width = width
-    elif config.UI_MODE == 1:
-        available_height = max(1, height - 4)  
-        available_width = max(20, width - 10)  
     else:
         available_height = max(1, height - 4)  
         available_width = max(20, width - 10)  
@@ -386,15 +378,9 @@ def get_visible_content(reader):
 
         for sent_idx, sentence in enumerate(sentences):
             is_current_sentence = sent_idx == reader.ui_sentence_idx
+            base_style = COLORS.TEXT_HIGHLIGHT if (is_current_sentence and config.SENTENCE_HIGHLIGHTING_ENABLED) else COLORS.TEXT_NORMAL
             
-            if is_current_sentence and config.SENTENCE_HIGHLIGHTING_ENABLED:
-                base_style = COLORS.TEXT_HIGHLIGHT
-            else:
-                base_style = COLORS.TEXT_NORMAL
-            
-            if (is_current_sentence and config.WORD_HIGHLIGHT_MODE > 0 and 
-                hasattr(reader, 'ui_word_idx')):
-                
+            if (is_current_sentence and config.WORD_HIGHLIGHT_MODE > 0 and hasattr(reader, 'ui_word_idx')):
                 leading_whitespace = ""
                 if sentence:
                     match = re.match(r"^(\s+)", sentence)
@@ -408,10 +394,9 @@ def get_visible_content(reader):
                 highlightable_word_count = 0
                 
                 for token_idx, token in enumerate(tokens):
-                    sub_parts = re.split(r'([—-])', token)
-                    
+                    sub_parts = re.split(r'([—–])', token)
                     for part in sub_parts:
-                        if part in ['—', '-'] or not re.search(r'[a-zA-Z0-9]', part):
+                        if part in ['—', '–'] or not has_alnum(part):
                             highlighted_text.append(part, style=base_style)
                         else:
                             if highlightable_word_count == reader.ui_word_idx:
@@ -435,7 +420,6 @@ def get_visible_content(reader):
         if i < len(reader.document_lines):
             line = reader.document_lines[i]
 
-            # === GESTION DES HEADINGS ===
             if isinstance(line, Text) and line.plain and line.plain.startswith('__H'):
                 level, text = _parse_heading_line(line.plain)
                 if level is not None:
@@ -450,14 +434,13 @@ def get_visible_content(reader):
                     line = Text(text, style=style, justify="left", no_wrap=False)
             else:
                 line = _apply_current_text_color(line)
-            # ============================
 
             if (i in reader.line_to_position and
                 reader.line_to_position[i][:2] == current_paragraph_key and
                 highlighted_paragraph_lines is not None and
                 not getattr(line, 'is_heading', False)):
 
-                para_start, para_end = reader.paragraph_line_ranges[current_paragraph_key]
+                para_start, _ = reader.paragraph_line_ranges[current_paragraph_key]
                 line_offset = i - para_start
 
                 if 0 <= line_offset < len(highlighted_paragraph_lines):
@@ -572,19 +555,12 @@ def get_compact_subtitle(reader, width):
     quit_text = f"[{COLORS.CONTROL_KEYS}]{quit_key}[/{COLORS.CONTROL_KEYS}]"
     auto_text = f"[{COLORS.CONTROL_KEYS}]{auto_scroll_key}{ICONS.SEPARATOR}{top_visible_key}[/{COLORS.CONTROL_KEYS}]"
     
-    if reader.auto_scroll_enabled:
-        auto_scroll_icon = ICONS.AUTO_SCROLL
-        auto_scroll_text = "AUTO"
-    else:
-        auto_scroll_icon = ICONS.MANUAL_MODE
-        auto_scroll_text = "MANUAL"
+    auto_scroll_icon = ICONS.AUTO_SCROLL if reader.auto_scroll_enabled else ICONS.MANUAL_MODE
+    auto_scroll_text = "AUTO" if reader.auto_scroll_enabled else "MANUAL"
     
     base_sep = ICONS.LINE_SEPARATOR_LONG
     pause_key = format_key_for_display(tts_shortcuts.get("play_pause", "p"))
-    if speed_indicator:
-        status_part = f"[{COLORS.CONTROL_KEYS}]{pause_key}[/{COLORS.CONTROL_KEYS}] {status_icon} {speed_indicator} {status_text}"
-    else:
-        status_part = f"[{COLORS.CONTROL_KEYS}]{pause_key}[/{COLORS.CONTROL_KEYS}] {status_icon} {status_text}"
+    status_part = f"[{COLORS.CONTROL_KEYS}]{pause_key}[/{COLORS.CONTROL_KEYS}] {status_icon} {speed_indicator} {status_text}" if speed_indicator else f"[{COLORS.CONTROL_KEYS}]{pause_key}[/{COLORS.CONTROL_KEYS}] {status_icon} {status_text}"
         
     status_extra = 1 if status_text == "PAUSED" else 0
     status_sep = base_sep + (ICONS.LINE_SEPARATOR_SHORT * status_extra)
@@ -654,7 +630,6 @@ def render_recent_books_overlay(reader, width, height):
             prefix = ">" if is_selected else " "
             title = book['title']
             percentage = f"{int(book['percentage'])}%"
-            
             table.add_row(prefix, Text(title, overflow="ellipsis", no_wrap=True), " ", percentage, style=style)
         content = table
 
@@ -698,9 +673,7 @@ def render_chapter_index_overlay(reader, width, height):
         for para in chapter:
             stripped = para.strip()
             if stripped and len(stripped) > 3:
-                title = stripped
-                if len(title) > 60:
-                    title = title[:57] + "..."
+                title = stripped[:57] + "..." if len(stripped) > 60 else stripped
                 break
 
         table.add_row(prefix, current_marker, Text(title, overflow="ellipsis", no_wrap=True), style=style)
@@ -717,24 +690,17 @@ def render_chapter_index_overlay(reader, width, height):
     return panel, min(60, width - 4), panel_height
 
 
-from rich.layout import Layout
-
 def render_split_view(reader, width, height):
-    """
-    Renders an optimized split view (80% Text, 20% Chapters) with selection & controls.
-    """
     layout = Layout()
     layout.split_row(
         Layout(name="text", ratio=8),
         Layout(name="chapters", ratio=2)
     )
 
-    # CORRECTION : On retire seulement 1 ligne au lieu de 4 pour supprimer la bande blanche en bas
     effective_height = max(10, height - 1)
     available_height = max(1, effective_height - 4)
     available_width = max(20, int(width * 0.8) - 6)
 
-    # Calcul dynamique du même texte de progression qu'en mode 2
     progress_percent = reader._calculate_ui_progress_percentage()
     progress_bar_width = 10
     filled_blocks = int((progress_percent / 100) * progress_bar_width)
@@ -750,7 +716,6 @@ def render_split_view(reader, width, height):
     connecting_line = ICONS.LINE_SEPARATOR_SHORT * remaining_space
     progress_text = f"{title_text} {connecting_line} {percentage_text}"
 
-    # 1. Text Panel (Left)
     visible_lines = get_visible_content(reader)
     book_content = Text("")
     
@@ -774,7 +739,6 @@ def render_split_view(reader, width, height):
         height=effective_height
     ))
 
-    # 2. Chapters Panel (Right) - Espacement corrigé et titre harmonisé
     chapter_table = Table(box=None, show_header=False, padding=0, expand=True)
     chapter_table.add_column("N°", width=4, style="dim")
     chapter_table.add_column("Title", ratio=1, overflow="ellipsis")
@@ -810,11 +774,7 @@ def render_split_view(reader, width, height):
             marker = "  "
             text_style = "dim"
             
-        chapter_table.add_row(
-            f"{marker}{i + 1}.", 
-            Text(title, style=text_style, overflow="ellipsis"), 
-            style=style
-        )
+        chapter_table.add_row(f"{marker}{i + 1}.", Text(title, style=text_style, overflow="ellipsis"), style=style)
 
     layout["chapters"].update(Panel(
         chapter_table,
@@ -828,6 +788,7 @@ def render_split_view(reader, width, height):
 
     return layout
 
+
 async def display_ui(reader):
     if reader.render_lock.locked():
         return
@@ -835,8 +796,6 @@ async def display_ui(reader):
     async with reader.render_lock:
         try:
             width, height = get_terminal_size()
-            
-            # Marge de sécurité globale pour éviter la troncature en haut (dock/menubar macOS)
             effective_height = max(10, height - 2)
             
             progress_percent = reader._calculate_ui_progress_percentage()
@@ -862,9 +821,6 @@ async def display_ui(reader):
             full_output = '\033[?25l\033[H'
             temp_console = Console(width=width, height=effective_height, force_terminal=True)
             
-            # ==========================================================
-            # SPLIT VIEW (MODE 4)
-            # ==========================================================
             if getattr(reader, 'split_view_enabled', False) or config.UI_MODE == 4:
                 split_output = render_split_view(reader, width, effective_height)
                 with temp_console.capture() as capture:

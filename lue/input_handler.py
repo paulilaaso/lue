@@ -1,6 +1,6 @@
 import sys
-import subprocess
 import json
+import logging
 import os
 import re
 import time
@@ -290,18 +290,19 @@ def process_input(reader):
                 reader.esc_start_time = None
             break
     except Exception:
-        pass
+        # Ne pas planter la boucle d'entrée, mais ne plus masquer les bugs.
+        logging.debug("Erreur dans process_input", exc_info=True)
 
 
 def _kill_audio_immediately(reader):
-    """Kill audio playback immediately."""
+    """Kill audio playback immediately.
+
+    Seuls les processus ffplay lancés par Lue (reader.playback_processes) sont
+    tués. L'ancien `pkill -f ffplay` visait TOUS les ffplay de la machine et
+    bloquait la boucle événementielle le temps de l'appel.
+    """
     for process in reader.playback_processes[:]:
         try:
             process.kill()
         except (ProcessLookupError, AttributeError):
             pass
-    try:
-        subprocess.run(['pkill', '-f', 'ffplay'], check=False, 
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass

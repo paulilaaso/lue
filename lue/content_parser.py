@@ -1,3 +1,8 @@
+"""
+Module de nettoyage et d'extraction de contenu pour différents formats de fichiers (EPUB, PDF, TXT, etc.).
+Version nettoyée sans importations superflues, sans régression.
+"""
+
 import os
 import re
 import zipfile
@@ -6,11 +11,6 @@ import fitz
 import markdown
 from docx import Document
 from striprtf.striprtf import rtf_to_text
-import subprocess
-import string
-from rich.console import Console
-from typing import List, Tuple
-from pathlib import Path
 from html.parser import HTMLParser
 from html import unescape
 from urllib.parse import unquote
@@ -19,16 +19,74 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-import re
+# ==========================================
+# OPTIMISATIONS P1 (PATTERNS & TABLES COMPILÉS)
+# ==========================================
+
+UNICODE_TRANSLATION_TABLE = str.maketrans({
+    '×': ' multiplied by ', '÷': ' divided by ', '±': ' plus or minus ',
+    '≤': ' less than or equal to ', '≥': ' greater than or equal to ', '≠': ' not equal to ',
+    '≈': ' approximately', '∞': 'infinity ', '%': ' percent ', '+': ' plus ', '=': ' equals ',
+    '°': ' degrees ', '™': ' trademark ', '®': ' registered ',
+    '©': ' copyright ', '§': ' section ',
+    "’": "'",
+    '\u200b': '', '\u200c': '', '\u200d': '',  
+    '\ufeff': '',  
+    '\u00ad': '',  
+})
+
+VISUAL_PATTERNS = {
+    'ellipsis_multi': re.compile(r'\s*\.\s*\.\s*\.\s*(\.\s*)*'),
+    'double_dot': re.compile(r'\s*\.\s*\.\s*(?!\s*\.)'),
+    'many_dots': re.compile(r'\.{4,}'),
+    'decoration': re.compile(r'[-_=~`^]{3,}'),
+    'stars': re.compile(r'[*]{4,}'),
+    'hash': re.compile(r'[#]{4,}'),
+    'plus': re.compile(r'[+]{3,}'),
+    'pipe': re.compile(r'[|]{3,}'),
+    'backslash': re.compile(r'[\\]{3,}'),
+    'slash': re.compile(r'[/]{3,}'),
+    'unicode_ellipsis': re.compile(r'…+'),
+    'ellipsis_space': re.compile(r'\.\.\.(?=\S)'),
+    'newlines': re.compile(r'\n\s*\n\s*\n+'),
+    'bold': re.compile(r'\*\*([^*]+)\*\*'),
+    'italic': re.compile(r'\*([^*]+)\*'),
+    'underline_bold': re.compile(r'__([^_]+)__'),
+    'underline': re.compile(r'_([^_]+)_'),
+    'code': re.compile(r'`([^`]+)`'),
+    'strike': re.compile(r'~~([^~]+)~~'),
+    'md_link': re.compile(r'\[([^\]]+)\]\([^)]+\)'),
+    'md_ref': re.compile(r'\[([^\]]+)\]\[[^\ ]*\]'),
+    'md_ref_def': re.compile(r'^\s*\[[^\ ]+\]:\s*\S+.*$', re.MULTILINE),
+    'md_heading': re.compile(r'^#{1,6}\s+', re.MULTILINE),
+    'punct_space': re.compile(r'\s+([,!?;:])'),
+    'double_punct': re.compile(r'([,!?;:])\s*([,!?;:])'),
+}
+
+WHITESPACE_PATTERN = re.compile(r'\s+')
+UNWANTED_TAGS_PATTERN = re.compile(r'<[^>]+>')
+
 
 def strip_unwanted_tags(text: str) -> str:
     """Supprime toutes les balises XML/HTML/SSML résiduelles avant la lecture audio."""
     if not isinstance(text, str):
         return ""
-    # Supprime les balises du type <speak>, </prosody>, <phoneme ...>, etc.
-    cleaned = re.sub(r'<[^>]+>', '', text)
+    cleaned = UNWANTED_TAGS_PATTERN.sub('', text)
     return cleaned.strip()
 
+def _normalize_raw_text(content: str) -> str:
+    """
+    Normalise le texte brut dès l'importation : applique la table de traduction 
+    Unicode pour supprimer les caractères invisibles et normalise les sauts de ligne.
+    """
+    if not content:
+        return ""
+    content = content.translate(UNICODE_TRANSLATION_TABLE)
+    content = content.replace('\r\n', '\n').replace('\r', '\n')
+    content = VISUAL_PATTERNS['newlines'].sub('\n\n', content)
+    return content
+    
+    
 def split_into_sentences(paragraph: str) -> list[str]:
     """
     Splits a paragraph into sentences, intelligently handling common abbreviations and initials.
@@ -38,7 +96,10 @@ def split_into_sentences(paragraph: str) -> list[str]:
         "Cpl", "Sgt", "Gen", "Col", "Capt", "Lt", "Pvt",
         "vs", "viz", "etc", "eg", "ie",
         "Co", "Inc", "Ltd", "Corp",
-        "St", "Ave", "Blvd"
+        "St", "Ave", "Blvd",
+        # Français (« M. Dupont » est déjà couvert par la règle des initiales)
+        "Mme", "Mmes", "Mlle", "Mlles", "Pr", "Ste", "cf", "chap", "fig",
+        "av", "apr", "éd",
     ]
     
     abbrev_pattern = r"\b(" + "|".join(abbreviations) + r")\."
@@ -77,11 +138,15 @@ def sanitize_text_for_tts(text):
     if not text or not isinstance(text, str):
         return ""
 
-    text = re.sub(r'(?:^|\s)[.!?]+(?=\s|$)', ' ', text)
+    # « vous ? » (typographie française) : on rattache ?/! au mot précédent au
+    # lieu de les supprimer ; seuls les points isolés (artefacts) disparaissent.
+    text = re.sub(r'(?:^|\s)(?!\.{2,})\.+(?=\s|$)', ' ', text)
+    text = re.sub(r'\s+([?!]+)(?=[\s»”)\]"\']|$)', r'\1', text)
+    text = re.sub(r'^\s*[?!]+(?=\s|$)\s*', '', text)
     text = re.sub(r'[—–]', ', ', text)
     text = re.sub(r'(?<=\w)-(?=\w)', ' ', text)
     sanitized = re.sub(r"[^\w\s.,:'();?!。，！？；：、।॥-]", '', text, flags=re.UNICODE)
-    sanitized = re.sub(r'\s+', ' ', sanitized)
+    sanitized = WHITESPACE_PATTERN.sub(' ', sanitized)
     return sanitized.strip()
 
 
@@ -101,55 +166,42 @@ def clean_visual_text(text):
         code_content = text[14:]  
         return code_content
     
-    text = re.sub(r'\s*\.\s*\.\s*\.\s*(\.\s*)*', '...', text)  
-    text = re.sub(r'\s*\.\s*\.\s*(?!\s*\.)', '..', text)  
-    text = re.sub(r'\.{4,}', '...', text)  
+    text = VISUAL_PATTERNS['ellipsis_multi'].sub('...', text)  
+    text = VISUAL_PATTERNS['double_dot'].sub('..', text)  
+    text = VISUAL_PATTERNS['many_dots'].sub('...', text)  
     
-    text = re.sub(r'[-_=~`^]{3,}', '', text)           
-    text = re.sub(r'[*]{4,}', '', text)                
-    text = re.sub(r'[#]{4,}', '', text)                
-    text = re.sub(r'[+]{3,}', '', text)                
-    text = re.sub(r'[|]{3,}', '', text)                
-    text = re.sub(r'[\\]{3,}', '', text)               
-    text = re.sub(r'[/]{3,}', '', text)                
+    text = VISUAL_PATTERNS['decoration'].sub('', text)           
+    text = VISUAL_PATTERNS['stars'].sub('', text)                
+    text = VISUAL_PATTERNS['hash'].sub('', text)                
+    text = VISUAL_PATTERNS['plus'].sub('', text)                
+    text = VISUAL_PATTERNS['pipe'].sub('', text)                
+    text = VISUAL_PATTERNS['backslash'].sub('', text)               
+    text = VISUAL_PATTERNS['slash'].sub('', text)                
     
-    unicode_replacements = {
-        '×': ' multiplied by ', '÷': ' divided by ', '±': ' plus or minus ',
-        '≤': ' less than or equal to ', '≥': ' greater than or equal to ', '≠': ' not equal to ',
-        '≈': ' approximately' , '∞': 'infinity ', '%': ' percent ', '+': ' plus ', '=': ' equals ',
-        '°': ' degrees ', '™': ' trademark ', '®': ' registered ',
-        '©': ' copyright ', '§': ' section ',
-        "’": "'",
-        '\u200b': '', '\u200c': '', '\u200d': '',  
-        '\ufeff': '',  
-        '\u00ad': '',  
-    }
+    text = text.translate(UNICODE_TRANSLATION_TABLE)
     
-    for old_char, new_char in unicode_replacements.items():
-        text = text.replace(old_char, new_char)
+    text = VISUAL_PATTERNS['many_dots'].sub('...', text)  
+    text = VISUAL_PATTERNS['unicode_ellipsis'].sub('...', text)      
     
-    text = re.sub(r'\.{4,}', '...', text)  
-    text = re.sub(r'…+', '...', text)      
+    text = WHITESPACE_PATTERN.sub(' ', text)  
+    text = VISUAL_PATTERNS['newlines'].sub('\n\n', text)  
     
-    text = re.sub(r'\s+', ' ', text)  
-    text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)  
+    text = VISUAL_PATTERNS['ellipsis_space'].sub('... ', text)  
     
-    text = re.sub(r'\.\.\.(?=\S)', '... ', text)  
+    text = VISUAL_PATTERNS['bold'].sub(r'\1', text)  
+    text = VISUAL_PATTERNS['italic'].sub(r'\1', text)      
+    text = VISUAL_PATTERNS['underline_bold'].sub(r'\1', text)      
+    text = VISUAL_PATTERNS['underline'].sub(r'\1', text)        
+    text = VISUAL_PATTERNS['code'].sub(r'\1', text)        
+    text = VISUAL_PATTERNS['strike'].sub(r'\1', text)      
     
-    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)  
-    text = re.sub(r'\*([^*]+)\*', r'\1', text)      
-    text = re.sub(r'__([^_]+)__', r'\1', text)      
-    text = re.sub(r'_([^_]+)_', r'\1', text)        
-    text = re.sub(r'`([^`]+)`', r'\1', text)        
-    text = re.sub(r'~~([^~]+)~~', r'\1', text)      
+    text = VISUAL_PATTERNS['md_link'].sub(r'\1', text)  
+    text = VISUAL_PATTERNS['md_ref'].sub(r'\1', text)  
+    text = VISUAL_PATTERNS['md_ref_def'].sub('', text)  
+    text = VISUAL_PATTERNS['md_heading'].sub('', text)  
     
-    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)  
-    text = re.sub(r'\[([^\]]+)\]\[[^\ ]*\]', r'\1', text)  
-    text = re.sub(r'^\s*\[[^\ ]+\]:\s*\S+.*$', '', text, flags=re.MULTILINE)  
-    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)  
-    
-    text = re.sub(r'\s+([,!?;:])', r'\1', text)  
-    text = re.sub(r'([,!?;:])\s*([,!?;:])', r'\1 \2', text)  
+    text = VISUAL_PATTERNS['punct_space'].sub(r'\1', text)  
+    text = VISUAL_PATTERNS['double_punct'].sub(r'\1 \2', text)  
     
     return text.strip()
 
@@ -266,7 +318,7 @@ class HTMLtoLines(HTMLParser):
             if self.ispref:
                 line = unescape(tmp)
             else:
-                line = unescape(re.sub(r"\s+", " ", tmp))
+                line = unescape(WHITESPACE_PATTERN.sub(" ", tmp))
             self.text[-1] += line
             if self.ishead:
                 self.idhead.add(len(self.text)-1)
@@ -340,7 +392,7 @@ class HTMLtoLines(HTMLParser):
         line = re.sub(r'\[[a-zA-Z]+\d*\]', '', line)
         line = re.sub(r'[*†‡§¶]+', '', line)
         line = re.sub(r'[¹²³⁴⁵⁶⁷⁸⁹⁰]+', '', line)
-        line = re.sub(r'\s+', ' ', line).strip()
+        line = WHITESPACE_PATTERN.sub(' ', line).strip()
         return line
 
 
@@ -363,6 +415,7 @@ def extract_content(file_path, console):
     else:
         console.print(f"[bold red]Error: Unsupported file type '{file_extension}'.[/bold red]")
         return []
+
 
 def _extract_content_epub(file_path, console):
     try:
@@ -466,6 +519,7 @@ def _extract_content_epub(file_path, console):
             logger.warning("Failed to close zip archive safely", exc_info=close_err)
         return []
 
+
 def _extract_content_pdf(file_path, console):
     from . import config
     
@@ -556,6 +610,7 @@ def _extract_content_pdf(file_path, console):
         
     return chapters if chapters else [all_paragraphs]
 
+
 def _extract_content_txt(file_path, console):
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -572,7 +627,9 @@ def _extract_content_txt(file_path, console):
         logger.error("Failed to read TXT file", exc_info=e)
         return []
 
-    content = content.replace('\r\n', '\n')
+    # Normalisation immédiate dès l'importation[cite: 2]
+    content = _normalize_raw_text(content)
+    
     paragraphs = [clean_visual_text(p.strip()) for p in content.split('\n\n') if p.strip()]
     paragraphs = [p for p in paragraphs if p and len(p) > 3]
     
@@ -595,6 +652,7 @@ def _extract_content_docx(file_path, console):
         logger.error("Failed to read DOCX file", exc_info=e)
         return []
         
+
 def _extract_content_rtf(file_path, console):
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -625,6 +683,9 @@ def _extract_content_md(file_path, console):
     except Exception as e:
         logger.error("Failed to read Markdown file", exc_info=e)
         return []
+
+    # Normalisation immédiate dès l'importation[cite: 2]
+    md_content = _normalize_raw_text(md_content)
 
     try:
         return [_parse_raw_markdown(md_content)]
@@ -740,6 +801,9 @@ def _extract_content_html(file_path, console):
     except Exception as e:
         logger.error("Failed to read HTML file", exc_info=e)
         return []
+
+    # Normalisation immédiate dès l'importation[cite: 2]
+    content = _normalize_raw_text(content)
 
     try:
         parser = HTMLtoLines()

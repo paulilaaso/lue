@@ -4,7 +4,7 @@ Word-level timing calculation module for the Lue eBook reader.
 
 import logging
 import re
-import string
+import unicodedata
 from functools import lru_cache
 from typing import List, Tuple, Optional, Dict, Any
 
@@ -21,45 +21,65 @@ def _sanitize_word(word: str) -> str:
     """
     if not word:
         return ""
-    
-    return re.sub(r'[^a-zA-Z0-9]', '', word).lower()
+
+    # Unicode : « été » reste « été » (l'ancien [^a-zA-Z0-9] donnait « t »,
+    # « élève » → « lve », « français » → « franais »). NFC pour qu'une lettre
+    # composée et décomposée comparent égales.
+    word = unicodedata.normalize('NFC', word)
+    return re.sub(r'[\W_]+', '', word).lower()
+
+
+# Seuls les tirets longs/demi-cadratins séparent deux mots collés ("mot—mot").
+# Le trait d'union fait partie du mot (« dit-elle », « peut-être », « a-t-il »).
+_DASH_SPLIT = re.compile(r'([—–])')
+
+
+def has_alnum(text: str) -> bool:
+    """True si `text` contient au moins une lettre/un chiffre (Unicode)."""
+    return any(ch.isalnum() for ch in text)
+
+
+def split_highlight_units(text: str) -> List[str]:
+    """
+    Découpe `text` en unités de surlignage, avec leur ponctuation d'origine.
+
+    C'est LA définition d'un « mot » partagée par le timing (word_mapping),
+    reader.py (current_sentence_words) et ui.py (rendu du mot courant) :
+    si ces trois endroits comptent différemment, le surlignage dérive.
+    Avant : timing comptait « « » », reader ignorait tout ce qui n'est pas
+    ASCII (« à » disparaissait) et ui coupait aux traits d'union.
+    """
+    if not text:
+        return []
+    units: List[str] = []
+    for token in text.split():
+        for part in _DASH_SPLIT.split(token):
+            if part and has_alnum(part):
+                units.append(part)
+    return units
 
 
 def _get_highlightable_words(text: str) -> List[str]:
     """
     Get list of words that should be considered for timing.
-    
+
     Args:
         text: The text to process
-        
+
     Returns:
-        List of cleaned words that should be timed
+        List of cleaned words that should be timed (same units, same order
+        as split_highlight_units, without surrounding punctuation)
     """
-    if not text:
-        return []
-        
-    words = []
-    for token in text.split():
-        cleaned = token.strip(string.punctuation)
-        if cleaned:
-            words.append(cleaned)
-    
-    return words
+    return [_extract_core_word(unit) for unit in split_highlight_units(text)]
 
 
 @lru_cache(maxsize=512)
 def _extract_core_word(token: str) -> str:
     """
-    Extract the core word from a token by removing surrounding punctuation.
-    
-    Args:
-        token: The token to process
-        
-    Returns:
-        The core word without surrounding punctuation
+    Extract the core word from a token by removing surrounding punctuation safely.
     """
     if not token:
-        return token
+        return ""
     
     start = 0
     while start < len(token) and not token[start].isalnum():
@@ -69,7 +89,10 @@ def _extract_core_word(token: str) -> str:
     while end >= start and not token[end].isalnum():
         end -= 1
     
-    return token[start:end + 1] if start <= end else ""
+    if start > end:
+        return ""
+        
+    return token[start:end + 1]
 
 
 def create_word_mapping(original_words: List[str], tts_word_timings: List[Tuple[str, float, float]]) -> Optional[List[int]]:
@@ -118,7 +141,7 @@ def create_word_mapping(original_words: List[str], tts_word_timings: List[Tuple[
         
         best_match_index = None
         best_match_score = 0
-        search_range = min(tts_len, tts_index + 5)
+        search_range = min(tts_len, tts_index + 10)
         
         for search_idx in range(tts_index, search_range):
             tts_sanitized_word = tts_sanitized[search_idx]
@@ -143,13 +166,44 @@ def create_word_mapping(original_words: List[str], tts_word_timings: List[Tuple[
         
         if best_match_index is None or best_match_score == 0:
             mapping.append(tts_index)
-            tts_index += 1
+            if any(ch.isdigit() for ch in orig_sanitized_word):
+                # « 1998 » est dit « mille neuf cent quatre-vingt-dix-huit » :
+                # plusieurs mots TTS pour un mot du texte. On resynchronise sur
+                # le prochain mot du texte au lieu d'avancer d'un seul cran.
+                resync = _find_resync_index(orig_sanitized, orig_index + 1, tts_sanitized, tts_index + 1)
+                tts_index = resync if resync is not None else tts_index + 1
+            else:
+                tts_index += 1
         else:
             mapping.append(best_match_index)
             if best_match_index <= tts_index + 2:
                 tts_index = best_match_index + 1
     
     return mapping
+
+
+RESYNC_LOOKAHEAD = 20
+
+
+def _find_resync_index(
+    orig_sanitized: List[str],
+    next_orig_index: int,
+    tts_sanitized: List[str],
+    tts_start: int,
+) -> Optional[int]:
+    """Index TTS du prochain mot (non numérique) du texte, ou None si introuvable."""
+    target = None
+    for word in orig_sanitized[next_orig_index:]:
+        if word and not any(ch.isdigit() for ch in word):
+            target = word
+            break
+    if target is None:
+        return None
+    stop = min(len(tts_sanitized), tts_start + RESYNC_LOOKAHEAD)
+    for idx in range(tts_start, stop):
+        if tts_sanitized[idx] == target:
+            return idx
+    return None
 
 
 @lru_cache(maxsize=256)
@@ -208,7 +262,8 @@ def adjust_word_timings_for_continuity(word_timings: List[Tuple[str, float, floa
                 if next_start_time > end_time:
                     end_time = next_start_time
                 elif next_start_time < end_time:
-                    end_time = (end_time + next_start_time) / 2
+                    # Alignement strict pour préserver la consistance des durées
+                    end_time = next_start_time
         
         adjusted_word_timings.append((word, start_time, end_time))
     

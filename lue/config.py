@@ -38,6 +38,22 @@ AUDIO_DATA_DIR = user_cache_dir("lue")
 os.makedirs(AUDIO_DATA_DIR, exist_ok=True)
 AUDIO_BUFFERS = [os.path.join(AUDIO_DATA_DIR, f"buffer_{i}") for i in range(6)]
 MAX_QUEUE_SIZE = 4
+AUDIO_CACHE_DIR = os.path.join(AUDIO_DATA_DIR, "cache")
+AUDIO_CACHE_MAX_MB = 500
+TTS_CACHE_VERSION = "2"   # à incrémenter si les paramètres de synthèse changent (le texte prosodié fait déjà partie de la clé de cache)
+
+# Prosodie / IPA (modules optionnels : french_prosody, english_prosody,
+# phonetic_ipa, prosody_with_ipa). Absents => Lue fonctionne en mode basique.
+PROSODY_LEVEL = "auto"     # "auto" (meilleur disponible) | "ipa" | "prosody" | "off" (plafonds)
+PROSODY_MAX_FAILURES = 5   # échecs consécutifs avant de désactiver un niveau pour la session
+
+# Garde-fous de synthèse, par moteur : timeout (secondes, None = illimité) et
+# nombre de nouvelles tentatives. Edge dépend du réseau ; Kokoro est local.
+TTS_SYNTHESIS = {
+    "edge":   {"timeout": 20.0, "retries": 1},
+    "kokoro": {"timeout": None, "retries": 0},
+}
+
 OVERLAP_SECONDS = 0.5 # Seconds of overlap between sentences
 
 # Progress tracking settings
