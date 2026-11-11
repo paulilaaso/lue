@@ -3,6 +3,7 @@ import subprocess
 import json
 import os
 import re
+import sys
 import time
 
 # Default keyboard shortcuts
@@ -64,8 +65,15 @@ def load_keyboard_shortcuts(file_path=None):
     try:
         with open(file_path, 'r') as f:
             KEYBOARD_SHORTCUTS = json.load(f)
-    except Exception:
-        # Fallback to default shortcuts if file cannot be loaded
+    except Exception as exc:
+        # Fall back to defaults, but say so: silently dropping the user's
+        # custom bindings (typo'd path, bad JSON, unreadable file) is worse
+        # than a one-line warning. Defaults keep the app usable.
+        print(
+            f"Warning: could not load keyboard shortcuts from "
+            f"'{file_path}' ({exc}); using defaults.",
+            file=sys.stderr,
+        )
         KEYBOARD_SHORTCUTS = DEFAULT_KEYBOARD_SHORTCUTS
 
 def _process_escape_sequence(reader, seq):
